@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+#
+# Pre-commit secret scanner. Blocks a commit if a staged file looks like it
+# contains a real secret. Uses gitleaks if installed; otherwise falls back to a
+# built-in regex scan (zero dependencies).
+#
+# Install:  bash scripts/install-hooks.sh
+# Bypass (use sparingly):  git commit --no-verify
+#
+set -euo pipefail
+
+# Files staged for commit (added/copied/modified), excluding deletions.
+# (Avoid `mapfile` — macOS ships bash 3.2, which doesn't have it.)
+files=()
+while IFS= read -r line; do
+  [ -n "$line" ] && files+=("$line")
+done < <(git diff --cached --name-only --diff-filter=ACM)
+[ ${#files[@]} -eq 0 ] && exit 0
+
+# Prefer gitleaks when available — it's far more thorough.
+if command -v gitleaks >/dev/null 2>&1; then
+  if ! gitleaks protect --staged --redact --no-banner; then
+    echo "✖ gitleaks found a potential secret in staged changes. Commit blocked." >&2
+    echo "  Remove the secret (use env vars), or bypass with: git commit --no-verify" >&2
+    exit 1
+  fi
+  exit 0
+fi
+
+# ── Fallback scanner (no gitleaks) ───────────────────────────────────────────
+# High-signal patterns. Skips lock files and binaries to avoid false positives.
+patterns='(sk-ant-[A-Za-z0-9_-]{20,})|(sk_live_[A-Za-z0-9]{20,})|(rk_live_[A-Za-z0-9]{20,})|(whsec_[A-Za-z0-9]{20,})|(re_[A-Za-z0-9]{20,})|(AKIA[0-9A-Z]{16})|(ghp_[A-Za-z0-9]{36})|(xox[baprs]-[A-Za-z0-9-]{10,})|(eyJ[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{15,})|(-----BEGIN [A-Z ]*PRIVATE KEY-----)|((SECRET|TOKEN|PASSWORD|API_?KEY|ENCRYPTION_KEY|CRON_SECRET|NEXTAUTH_SECRET)[A-Z_]*\s*[:=]\s*[A-Za-z0-9+/_-]{16,})|(Bearer\s+[A-Za-z0-9._-]{20,})'
+
+found=0
+for f in "${files[@]}"; do
+  case "$f" in
+    package-lock.json|*.lock|yarn.lock|pnpm-lock.yaml|*.png|*.jpg|*.jpeg|*.gif|*.ico|*.woff|*.woff2|.env.example) continue ;;
+  esac
+  [ -f "$f" ] || continue
+  # Scan only the staged content of this file.
+  if git show ":$f" 2>/dev/null | grep -nIEq "$patterns"; then
+    echo "✖ Possible secret in: $f" >&2
+    git show ":$f" 2>/dev/null | grep -nIE "$patterns" | sed -E 's/([:=]\s*[A-Za-z0-9+/_-]{4})[A-Za-z0-9+/_-]+/\1…REDACTED/' | sed 's/^/    /' >&2
+    found=1
+  fi
+done
+
+if [ "$found" -eq 1 ]; then
+  echo "" >&2
+  echo "Commit blocked. Move secrets to environment variables (.env is gitignored)." >&2
+  echo "If this is a false positive, bypass with: git commit --no-verify" >&2
+  exit 1
+fi
+exit 0

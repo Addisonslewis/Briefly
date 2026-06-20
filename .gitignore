@@ -41,4 +41,5 @@ next-env.d.ts
 # local dev notes / scratch (not for public repo)
 CONTEXT.md
 LAUNCH-CHECKLIST.md
+SECURITY-REMEDIATION.md
 .env.vercel-check
